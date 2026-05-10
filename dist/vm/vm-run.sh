@@ -49,6 +49,7 @@ RUN_DRIVE="$FCGHAR_VAR/runner-$SLOT.xfs"
 PIDFILE="$FCGHAR_VAR/runner-$SLOT.pid"
 LOGFILE="$FCGHAR_VAR/runner-$SLOT.log"
 CONFIG="$FCGHAR_VAR/runner-$SLOT.config.json"
+MMDS_JSON="$FCGHAR_VAR/runner-$SLOT.mmds.json"
 
 [ -f "$CONFIG_TEMPLATE" ] || { echo "error: missing $CONFIG_TEMPLATE" >&2; exit 1; }
 [ -f "$TEMPLATE" ] || { echo "error: missing $TEMPLATE — run ./build-rootfs.sh first" >&2; exit 1; }
@@ -86,12 +87,32 @@ sed -e "s|__IP__|$VM_IP|g" \
     -e "s/\"mem_size_mib\": *[0-9]\\+/\"mem_size_mib\": $MEM_MIB/" \
     "$CONFIG_TEMPLATE" > "$CONFIG"
 
+# MMDS payload: gha-register fetches URL+TOKEN from http://169.254.169.254/
+# at first boot, so the rootfs stays generic and we don't rebuild per token.
+# Either PROJECT=owner/repo or full URL= works.
+if [ -n "${TOKEN:-}" ]; then
+    if [ -z "${URL:-}" ] && [ -n "${PROJECT:-}" ]; then
+        URL="https://github.com/$PROJECT"
+    fi
+    : "${URL:?need URL or PROJECT when TOKEN is set}"
+    cat > "$MMDS_JSON" <<EOF
+{ "fcghar": { "url": "$URL", "token": "$TOKEN" } }
+EOF
+    chmod 0600 "$MMDS_JSON"
+    echo ">> mmds: url=$URL token=<elided>"
+else
+    cat > "$MMDS_JSON" <<'EOF'
+{ "fcghar": {} }
+EOF
+    echo ">> mmds: empty (no TOKEN given — runner won't auto-register)"
+fi
+
 if [ "$BACKGROUND" -eq 1 ]; then
     echo ">> starting firecracker in background (log: $LOGFILE)"
-    setsid firecracker --no-api --config-file "$CONFIG" </dev/null >"$LOGFILE" 2>&1 &
+    setsid firecracker --no-api --config-file "$CONFIG" --metadata "$MMDS_JSON" </dev/null >"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     echo "   pid $(cat "$PIDFILE")"
 else
     echo ">> starting firecracker (foreground)"
-    exec firecracker --no-api --config-file "$CONFIG"
+    exec firecracker --no-api --config-file "$CONFIG" --metadata "$MMDS_JSON"
 fi

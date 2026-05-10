@@ -10,7 +10,6 @@ Before=gha.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-EnvironmentFile=-/etc/fcghar/register.env
 ExecStart=/usr/local/bin/gha-register
 
 [Install]

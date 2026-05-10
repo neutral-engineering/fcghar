@@ -33,8 +33,8 @@ help: ## Show this help
 vm-images: ## Pull base docker image used by build-rootfs.sh (DISTRO=debian-trixie|debian-bookworm|ubuntu-noble|ubuntu-jammy|arch)
 	dist/vm/fetch-images.sh
 
-vm-rootfs: ## Build /tmp/fcghar/rootfs.xfs + kernel (PROJECT=…/TOKEN=… optional, baked into register.env)
-	PROJECT="$$PROJECT" URL="$$URL" TOKEN="$$TOKEN" dist/vm/build-rootfs.sh
+vm-rootfs: ## Build /tmp/fcghar/rootfs.xfs + kernel (generic template; URL/TOKEN come from MMDS at boot)
+	dist/vm/build-rootfs.sh
 
 vm-net-up: ## Bring up fcghar-br0 + N taps + NAT (sudo); SLOTS=N for tap count
 	dist/vm/net-up.sh
@@ -42,17 +42,17 @@ vm-net-up: ## Bring up fcghar-br0 + N taps + NAT (sudo); SLOTS=N for tap count
 vm-net-down: ## Tear down fcghar-br0 + all taps + NAT (sudo)
 	dist/vm/net-down.sh
 
-vm-run: ## Boot a VM in foreground at the next free SLOT (or SLOT=N) — Ctrl-C to stop
-	SLOT="$$SLOT" dist/vm/vm-run.sh
+vm-run: ## Boot a VM in foreground at the next free SLOT — Ctrl-C to stop
+	SLOT="$$SLOT" PROJECT="$$PROJECT" URL="$$URL" TOKEN="$$TOKEN" dist/vm/vm-run.sh
 
 vm-up: ## Boot a VM in background at the next free SLOT (builds rootfs/network as needed)
 	@[ -f /tmp/fcghar/rootfs.xfs ] || dist/vm/build-rootfs.sh
 	@ip link show fcghar-br0 >/dev/null 2>&1 || dist/vm/net-up.sh
-	@SLOT="$$SLOT" dist/vm/vm-run.sh --background
+	@SLOT="$$SLOT" PROJECT="$$PROJECT" URL="$$URL" TOKEN="$$TOKEN" dist/vm/vm-run.sh --background
 	@echo
 	@echo "VM booting. 'SLOT=N make ssh-runner' to log in (default 0)."
-	@echo "To register a runner: 'make oneshot' rebuilds with token baked in,"
-	@echo "or 'SLOT=N make vm-adopt' SSH-registers an already-built image."
+	@echo "Pass PROJECT=… TOKEN=… on the make line and the runner auto-registers via MMDS."
+	@echo "Without a token, use 'SLOT=N make vm-adopt' to SSH-register after the fact."
 
 vm-down: ## Kill VMs (SLOT=N for one slot, default: all running)
 	@if [ -n "$$SLOT" ]; then \
@@ -93,16 +93,16 @@ vm-adopt: ## SSH-register an already-built VM: PROJECT=owner/repo TOKEN=<token> 
 	fi
 	SLOT="$$SLOT" PROJECT="$$PROJECT" URL="$$URL" TOKEN="$$TOKEN" dist/vm/adopt.sh
 
-oneshot: ## End-to-end: PROJECT=owner/repo TOKEN=<token> make oneshot (rebuilds rootfs, boots next free slot)
+oneshot: ## End-to-end: PROJECT=owner/repo TOKEN=<token> make oneshot (builds rootfs if missing, boots next free slot, MMDS-registers)
 	@if [ -z "$$PROJECT" ] || [ -z "$$TOKEN" ]; then \
 	  echo "usage: PROJECT=owner/repo TOKEN=<token> make oneshot"; exit 2; \
 	fi
 	@docker image inspect debian:trixie >/dev/null 2>&1 || dist/vm/fetch-images.sh
-	PROJECT="$$PROJECT" TOKEN="$$TOKEN" dist/vm/build-rootfs.sh
+	@[ -f /tmp/fcghar/rootfs.xfs ] || dist/vm/build-rootfs.sh
 	@ip link show fcghar-br0 >/dev/null 2>&1 || dist/vm/net-up.sh
-	@dist/vm/vm-run.sh --background
+	PROJECT="$$PROJECT" TOKEN="$$TOKEN" dist/vm/vm-run.sh --background
 	@echo
-	@echo "VM booting. Token baked in; gha-register.service will run on first boot."
+	@echo "VM booting. URL+TOKEN served via MMDS; gha-register.service curls it on first boot."
 	@echo "Tail with '[SLOT=N] make vm-tail', ssh with '[SLOT=N] make ssh-runner'."
 
 ssh-runner: ## ssh into a runner VM (SLOT=N, default 0)

@@ -16,10 +16,14 @@ Token is short-lived (~1h). Grab one from:
 gh api -X POST repos/<owner>/<repo>/actions/runners/registration-token | jq -r .token
 ```
 
-`make oneshot` builds the rootfs (with the token baked into
-`/etc/fcghar/register.env`), boots the VM, and lets a one-shot
-`gha-register.service` register the runner on first boot. After that
-`gha.service` keeps `run.sh` alive across reboots.
+`make oneshot` builds the rootfs (once — it's a generic template with no
+token in it), boots a VM, and serves `URL`/`TOKEN` to the guest via
+firecracker's MMDS (metadata service at `http://169.254.169.254`). A
+one-shot `gha-register.service` curls the metadata on first boot, runs
+`config.sh`, and touches a guard file so it never re-registers. After
+that `gha.service` keeps `run.sh` alive across reboots. Re-running
+`oneshot` with a new token is cheap — no docker rebuild, just another
+VM boot at the next free slot.
 
 ## Multiple runners
 
@@ -75,13 +79,17 @@ dist/vm/
   fetch-images.sh         docker pull the base image (DISTRO-aware)
   net-up.sh / net-down.sh fcghar-br0 192.168.43.0/24 + tap-runner-0..N + NAT (sudo)
   vm-run.sh               picks free SLOT, sed-substitutes IP/MAC/TAP/HOST/
-                          DRIVE/VCPU/MEM into runner.json template, boots
+                          DRIVE/VCPU/MEM into runner.json, writes per-slot
+                          MMDS metadata (URL/TOKEN), boots firecracker with
+                          --metadata
   adopt.sh                fallback: SSH in, run config.sh with URL+TOKEN
-  configs/runner.json     firecracker config template (vcpu/mem are sed'd)
+  configs/runner.json     firecracker config template (mmds-config + sed'd
+                          per-slot values)
   extract-vmlinux         decompresses bzImage to ELF for firecracker
   overlays/               files baked into the rootfs:
     etc/systemd/system/   fcghar-network.service, gha-register.service,
                           gha.service
     usr/local/bin/        fcghar-network (parses kernel cmdline, brings up
-                          eth0), gha-register (config.sh + touchfile guard)
+                          eth0, pins 169.254.169.254 route), gha-register
+                          (curl MMDS → config.sh + touchfile guard)
 ```

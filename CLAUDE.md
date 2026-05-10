@@ -23,20 +23,44 @@ that are not derivable from the code alone.
 
 ## Registration model
 
-- Token is **baked into the image** at `/etc/fcghar/register.env` (mode
-  0600), written by `build-rootfs.sh` after the loop-mount step.
+- Token is **served via MMDS**, not baked into the rootfs. `vm-run.sh`
+  writes a per-slot JSON (`/tmp/fcghar/runner-N.mmds.json`) shaped
+  `{"fcghar": {"url": "...", "token": "..."}}` and starts firecracker
+  with `--metadata path/to/that.json`. Firecracker serves it at
+  `http://169.254.169.254/fcghar`.
+- The rootfs (`/tmp/fcghar/rootfs.xfs`) is **generic** — no URL/TOKEN in
+  it. Build it once with `make vm-rootfs`; re-running `oneshot` with a
+  new token reuses the template (no docker rebuild).
+- `fcghar-network` adds a `169.254.169.254/32 dev eth0` route so the curl
+  in `gha-register` finds MMDS without going via the default gw.
 - `gha-register.service` is a oneshot guarded by
-  `ConditionPathExists=!/etc/fcghar/.registered`. On first boot it sources
-  `register.env`, runs `config.sh --unattended`, and touches the guard.
+  `ConditionPathExists=!/etc/fcghar/.registered`. On first boot it curls
+  `/fcghar`, parses url/token with `jq`, runs `config.sh --unattended`,
+  and touches the guard. On failure (no MMDS, empty payload) it touches
+  the guard anyway so we don't loop.
 - `gha.service` has `Requires=gha-register.service` and
   `ConditionPathExists=/home/gha/runner/.runner` so it can't start an
   unregistered runner into a `Restart=always` loop.
-- `adopt.sh` is the late-bind escape hatch: build a tokenless rootfs, then
+- `adopt.sh` is the late-bind escape hatch: boot a VM without TOKEN, then
   `URL=… TOKEN=… [SLOT=N] make vm-adopt` to register over SSH.
-- **Tokens are single-use.** Each `oneshot` rebuilds the template with the
-  given token; the new VM's runner-N.xfs is a copy at boot time. Calling
-  `oneshot` twice with the *same* token will fail registration on the
-  second VM. One token per VM.
+- **Tokens are single-use.** One token per VM. The single-use property is
+  unrelated to MMDS — it's GitHub's API behavior. Calling `oneshot` twice
+  with the same token will succeed on the first slot and fail on the
+  second.
+
+## MMDS specifics
+
+- V1 (no session-token PUT dance). Configured via `mmds-config.version`
+  in `configs/runner.json`. We don't have a guest-side HTTP server that
+  could be SSRF'd, so V2's protection buys us nothing.
+- `mmds-config.network_interfaces: ["eth0"]` is what grants the iface
+  access; the per-NIC `allow_mmds_requests` field is deprecated.
+- `--metadata <file>` is the `--no-api`-mode equivalent of `PATCH /mmds`
+  on the API socket. Loaded at firecracker start, before the guest kernel
+  jumps to userspace.
+- `firecracker` watches dst-IP 169.254.169.254 on the tap and responds
+  inline; the kernel still needs to ARP for it, which is why
+  `fcghar-network` adds the /32 route via eth0.
 
 ## Distro support
 

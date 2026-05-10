@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build /tmp/fcghar/rootfs.xfs + kernel + initrd from a Debian/Ubuntu docker
-# image plus everything in overlays/. Bakes the actions-runner tarball in
-# pre-extracted under /home/gha/runner; if PROJECT/URL + TOKEN are set, also
-# bakes /etc/fcghar/register.env so gha-register.service auto-registers on
-# first boot.
+# Build /tmp/fcghar/rootfs.xfs + kernel + initrd from a Debian/Ubuntu/Arch
+# docker image plus everything in overlays/. Bakes the actions-runner
+# tarball in pre-extracted under /home/gha/runner. The rootfs is generic
+# (no URL/TOKEN baked in); registration data is delivered at boot via MMDS
+# by vm-run.sh.
 #
 # The mount + tar-extract step needs sudo. Everything else is unprivileged.
 set -euo pipefail
@@ -184,12 +184,10 @@ cat >> "$DOCKERFILE" <<'EOF'
 # Overlays (systemd units, network helper, resolv.conf).
 COPY overlays/ /
 
-# /etc/fcghar/ holds register.env (URL/TOKEN, written into the rootfs at
-# build-time below) and the .registered touchfile that gha-register.service
-# uses to skip itself on subsequent boots.
+# /etc/fcghar/ holds the .registered touchfile that gha-register.service
+# uses to skip itself on subsequent boots. URL/TOKEN come from MMDS at boot,
+# not from a file in the rootfs.
 RUN mkdir -p /etc/fcghar \
-    && touch /etc/fcghar/register.env \
-    && chmod 0600 /etc/fcghar/register.env \
     && chmod 0755 /usr/local/bin/fcghar-network /usr/local/bin/gha-register
 
 # Per-VM network from kernel cmdline. gha-register fires once at first boot,
@@ -242,23 +240,6 @@ sudo tee "$MNT/etc/resolv.conf" > /dev/null <<'EOF'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 EOF
-
-# Bake URL + TOKEN into /etc/fcghar/register.env so gha-register.service
-# auto-registers on first boot. Either PROJECT=owner/repo or URL=… works.
-if [ -n "${TOKEN:-}" ]; then
-    if [ -z "${URL:-}" ] && [ -n "${PROJECT:-}" ]; then
-        URL="https://github.com/$PROJECT"
-    fi
-    : "${URL:?need URL or PROJECT when TOKEN is set}"
-    sudo tee "$MNT/etc/fcghar/register.env" > /dev/null <<EOF
-URL=$URL
-TOKEN=$TOKEN
-EOF
-    sudo chmod 0600 "$MNT/etc/fcghar/register.env"
-    echo "   baked URL=$URL into /etc/fcghar/register.env (token elided)"
-else
-    echo "   no TOKEN given — register.env left empty; use 'make vm-adopt' at runtime"
-fi
 
 sudo mkdir -p "$MNT/dev" "$MNT/proc" "$MNT/sys" "$MNT/run"
 sudo umount "$MNT"

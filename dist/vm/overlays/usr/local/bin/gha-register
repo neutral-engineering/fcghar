@@ -1,14 +1,36 @@
 #!/bin/sh
-# First-boot one-shot. Reads URL + TOKEN from /etc/fcghar/register.env
-# (via systemd EnvironmentFile=), registers the runner, then touches
+# First-boot one-shot. Fetches URL + TOKEN from MMDS (firecracker's metadata
+# service at http://169.254.169.254/), registers the runner, then touches
 # /etc/fcghar/.registered so gha-register.service is skipped on subsequent
 # boots (ConditionPathExists=!).
+#
+# MMDS payload shape (written by vm-run.sh):
+#   { "fcghar": { "url": "...", "token": "..." } }
 set -eu
 
-if [ -z "${URL:-}" ] || [ -z "${TOKEN:-}" ]; then
-    echo "gha-register: /etc/fcghar/register.env empty or missing URL/TOKEN — skipping" >&2
-    # touch the guard so gha.service can still come up (if you registered
-    # manually) and we don't keep retrying.
+MMDS_BASE="http://169.254.169.254"
+
+# Tolerate a brief gap between fcghar-network finishing and MMDS being
+# reachable. In practice it's immediate, but a tiny retry loop is cheap.
+meta=
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if meta=$(curl -fsS --max-time 2 "$MMDS_BASE/fcghar"); then
+        break
+    fi
+    sleep 0.5
+done
+
+if [ -z "${meta:-}" ]; then
+    echo "gha-register: MMDS unreachable at $MMDS_BASE/fcghar — skipping" >&2
+    touch /etc/fcghar/.registered
+    exit 0
+fi
+
+URL=$(printf '%s' "$meta" | jq -r '.url // empty')
+TOKEN=$(printf '%s' "$meta" | jq -r '.token // empty')
+
+if [ -z "$URL" ] || [ -z "$TOKEN" ]; then
+    echo "gha-register: MMDS returned no url/token — skipping" >&2
     touch /etc/fcghar/.registered
     exit 0
 fi

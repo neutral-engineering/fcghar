@@ -19,6 +19,10 @@
       "guest_mac": "__MAC__"
     }
   ],
+  "mmds-config": {
+    "version": "V1",
+    "network_interfaces": ["eth0"]
+  },
   "machine-config": {
     "vcpu_count": 4,
     "mem_size_mib": 4096,
