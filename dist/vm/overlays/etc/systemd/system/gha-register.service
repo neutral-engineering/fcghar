@@ -1,0 +1,17 @@
+[Unit]
+Description=One-shot github actions runner registration
+# Skip on every boot after the first successful run.
+ConditionPathExists=!/etc/fcghar/.registered
+After=fcghar-network.service network-online.target
+Wants=network-online.target
+Requires=fcghar-network.service
+Before=gha.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/fcghar/register.env
+ExecStart=/usr/local/bin/gha-register
+
+[Install]
+WantedBy=multi-user.target

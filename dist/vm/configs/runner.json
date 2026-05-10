@@ -1,0 +1,27 @@
+{
+  "boot-source": {
+    "kernel_image_path": "/tmp/fcghar/vmlinux",
+    "initrd_path": "/tmp/fcghar/initrd",
+    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off net.ifnames=0 root=/dev/vda rw fcghar.ip=__IP__ fcghar.gw=192.168.43.1 fcghar.netmask=255.255.255.0 fcghar.host=__HOST__"
+  },
+  "drives": [
+    {
+      "drive_id": "rootfs",
+      "path_on_host": "__DRIVE__",
+      "is_root_device": true,
+      "is_read_only": false
+    }
+  ],
+  "network-interfaces": [
+    {
+      "iface_id": "eth0",
+      "host_dev_name": "__TAP__",
+      "guest_mac": "__MAC__"
+    }
+  ],
+  "machine-config": {
+    "vcpu_count": 4,
+    "mem_size_mib": 4096,
+    "smt": false
+  }
+}

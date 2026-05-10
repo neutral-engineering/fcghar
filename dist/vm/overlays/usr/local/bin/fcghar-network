@@ -1,0 +1,91 @@
+#!/bin/sh
+# Configure eth0 + hostname from kernel cmdline keys: fcghar.ip, fcghar.gw,
+# fcghar.netmask, fcghar.host. Run once at boot by fcghar-network.service.
+set -eu
+
+log() { echo "fcghar-network: $*" >&2; }
+
+cmdline_get() {
+    key="$1"
+    for tok in $(cat /proc/cmdline); do
+        case "$tok" in
+            "$key"=*) printf '%s' "${tok#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+require_cmdline() {
+    val=$(cmdline_get "$1") || { log "missing kernel cmdline key: $1"; return 1; }
+    [ -n "$val" ] || { log "empty kernel cmdline key: $1"; return 1; }
+    printf '%s' "$val"
+}
+
+mask_to_prefix() {
+    case "$1" in
+        255.255.255.0) printf '24' ;;
+        *) log "unsupported netmask: $1"; return 1 ;;
+    esac
+}
+
+# Find the first virtio_net interface. With net.ifnames=0 it's eth0; without,
+# it might be enp0s2 or similar (e.g. some Arch setups). Either way we expose
+# what we picked in the journal so failures are debuggable.
+find_iface() {
+    n=0
+    while [ $n -lt 30 ]; do
+        for iface in eth0 $(ls /sys/class/net 2>/dev/null); do
+            [ "$iface" = "lo" ] && continue
+            if [ -L "/sys/class/net/$iface/device/driver" ] \
+                && readlink "/sys/class/net/$iface/device/driver" 2>/dev/null | grep -q virtio_net; then
+                printf '%s' "$iface"; return 0
+            fi
+        done
+        sleep 0.2
+        n=$((n + 1))
+    done
+    log "no virtio_net interface found after 6s"
+    log "available: $(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
+    return 1
+}
+
+case "${1:-up}" in
+    up)
+        ip=$(require_cmdline fcghar.ip)
+        gw=$(require_cmdline fcghar.gw)
+        mask=$(require_cmdline fcghar.netmask)
+        host=$(require_cmdline fcghar.host)
+        prefix=$(mask_to_prefix "$mask")
+
+        iface=$(find_iface)
+        log "configuring $iface: ip=$ip/$prefix gw=$gw host=$host"
+
+        ip link set "$iface" up
+        ip addr flush dev "$iface"
+        ip addr add "${ip}/${prefix}" dev "$iface"
+        ip route add default via "$gw" dev "$iface"
+
+        # We run before basic.target (DefaultDependencies=no), so dbus isn't
+        # up yet — that rules out `hostnamectl`. `hostname` (the binary) is
+        # in inetutils on Arch and isn't part of base. Write directly to
+        # both files, which is what either tool would do anyway.
+        echo "$host" > /etc/hostname
+        echo "$host" > /proc/sys/kernel/hostname
+        if grep -q '^127\.0\.1\.1' /etc/hosts; then
+            sed -i "s|^127\.0\.1\.1.*|127.0.1.1\t$host|" /etc/hosts
+        else
+            printf '127.0.1.1\t%s\n' "$host" >> /etc/hosts
+        fi
+        ;;
+    down)
+        ip route del default 2>/dev/null || true
+        for iface in $(ls /sys/class/net 2>/dev/null); do
+            [ "$iface" = "lo" ] && continue
+            ip addr flush dev "$iface" 2>/dev/null || true
+        done
+        ;;
+    *)
+        echo "usage: $0 {up|down}" >&2
+        exit 2
+        ;;
+esac

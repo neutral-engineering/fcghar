@@ -1,0 +1,30 @@
+#!/bin/sh
+# First-boot one-shot. Reads URL + TOKEN from /etc/fcghar/register.env
+# (via systemd EnvironmentFile=), registers the runner, then touches
+# /etc/fcghar/.registered so gha-register.service is skipped on subsequent
+# boots (ConditionPathExists=!).
+set -eu
+
+if [ -z "${URL:-}" ] || [ -z "${TOKEN:-}" ]; then
+    echo "gha-register: /etc/fcghar/register.env empty or missing URL/TOKEN — skipping" >&2
+    # touch the guard so gha.service can still come up (if you registered
+    # manually) and we don't keep retrying.
+    touch /etc/fcghar/.registered
+    exit 0
+fi
+
+# `hostname` is in inetutils on Arch — not in base. /etc/hostname is the
+# system-of-record (set by fcghar-network); read it directly.
+NAME="${RUNNER_NAME:-fcghar-$(cut -d. -f1 < /etc/hostname 2>/dev/null || echo runner)}"
+LABELS="${RUNNER_LABELS:-fcghar,firecracker}"
+
+cd /home/gha/runner
+sudo -u gha -- ./config.sh \
+    --unattended \
+    --url "$URL" \
+    --token "$TOKEN" \
+    --name "$NAME" \
+    --labels "$LABELS" \
+    --replace
+
+touch /etc/fcghar/.registered

@@ -1,0 +1,15 @@
+[Unit]
+Description=github actions
+After=network-online.target fcghar-network.service gha-register.service
+Wants=network-online.target
+Requires=gha-register.service
+ConditionPathExists=/home/gha/runner/.runner
+
+[Service]
+User=gha
+WorkingDirectory=/home/gha/runner
+ExecStart=/home/gha/runner/run.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

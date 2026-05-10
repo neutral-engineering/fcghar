@@ -1,0 +1,48 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# extract-vmlinux - Extract uncompressed vmlinux from a kernel image
+# Verbatim from the kernel tree's scripts/extract-vmlinux.
+# Firecracker x86_64 only loads uncompressed ELF; Debian ships bzImage.
+# (c) 2009,2010 Dick Streefland <dick@streefland.net>
+# (c) 2011      Corentin Chary <corentin.chary@gmail.com>
+
+check_vmlinux()
+{
+	readelf -h $1 > /dev/null 2>&1 || return 1
+	cat $1
+	exit 0
+}
+
+try_decompress()
+{
+	for	pos in `tr "$1\n$2" "\n$2=" < "$img" | grep -abo "^$2"`
+	do
+		pos=${pos%%:*}
+		tail -c+$pos "$img" | $3 > $tmp 2> /dev/null
+		check_vmlinux $tmp
+	done
+}
+
+me=${0##*/}
+img=$1
+if	[ $# -ne 1 -o ! -s "$img" ]
+then
+	echo "Usage: $me <kernel-image>" >&2
+	exit 2
+fi
+
+tmp=$(mktemp /tmp/vmlinux-XXX)
+trap "rm -f $tmp" 0
+
+try_decompress '\037\213\010' xy    gunzip
+try_decompress '\3757zXZ\000' abcde unxz
+try_decompress 'BZh'          xy    bunzip2
+try_decompress '\135\0\0\0'   xxx   unlzma
+try_decompress '\211\114\132' xy    'lzop -d'
+try_decompress '\002!L\030'   xxx   'lz4 -d'
+try_decompress '(\265/\375'   xxx   unzstd
+
+check_vmlinux $img
+
+echo "$me: Cannot find vmlinux." >&2
+exit 1

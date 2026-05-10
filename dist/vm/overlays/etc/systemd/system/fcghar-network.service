@@ -1,0 +1,16 @@
+[Unit]
+Description=fcghar per-VM network from kernel cmdline
+DefaultDependencies=no
+After=systemd-sysctl.service
+Before=network.target shutdown.target
+Wants=network.target network-online.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/fcghar-network up
+ExecStop=/usr/local/bin/fcghar-network down
+
+[Install]
+WantedBy=multi-user.target
