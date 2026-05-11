@@ -8,6 +8,12 @@
 # The mount + tar-extract step needs sudo. Everything else is unprivileged.
 set -euo pipefail
 
+# Absolutize PREHOOK before we cd — it was passed relative to the caller's
+# PWD (typically the repo root), not relative to dist/vm/.
+if [ -n "${PREHOOK:-}" ]; then
+    case "$PREHOOK" in /*) ;; *) PREHOOK="$PWD/$PREHOOK" ;; esac
+fi
+
 cd "$(dirname "$0")"
 
 # shellcheck source=distros.sh
@@ -82,6 +88,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \\
         systemd systemd-sysv dbus \\
         ${KERNEL_PKG} \\
+        initramfs-tools \\
         ca-certificates curl \\
         git jq sudo \\
         iproute2 iputils-ping \\
@@ -90,6 +97,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
         xfsprogs \\
         ${EXTRA_PKGS} \\
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu's linux-image-virtual postinst doesn't reliably leave an initrd in
+# /boot inside docker (Debian's cloud kernel does). Force it for every
+# installed kernel; tolerate "already exists" so Debian stays a no-op.
+RUN for kver in \$(ls /lib/modules/ 2>/dev/null); do \\
+        update-initramfs -c -k "\$kver" 2>/dev/null \\
+            || update-initramfs -u -k "\$kver"; \\
+    done
 
 # Drop services that stall boot in a minimal microVM.
 RUN systemctl mask \\
@@ -278,7 +293,7 @@ docker export "$CID" > "$ROOTFS_TAR"
 docker rm "$CID" >/dev/null
 
 echo ">> extracting kernel (firecracker x86_64 only loads uncompressed ELF)"
-KERNEL_NAME=$(tar -tf "$ROOTFS_TAR" | grep -E "$KERNEL_GLOB" | head -1)
+KERNEL_NAME=$(tar -tf "$ROOTFS_TAR" | grep -E "$KERNEL_GLOB" | head -1 || true)
 if [ -z "$KERNEL_NAME" ]; then
     echo "error: no kernel matching $KERNEL_GLOB found in rootfs" >&2
     exit 1
@@ -289,7 +304,7 @@ tar -xOf "$ROOTFS_TAR" "$KERNEL_NAME" > "$BUILD_CTX/bzImage"
 echo "   wrote $KERNEL_OUT ($(stat -c%s "$KERNEL_OUT") bytes ELF)"
 
 echo ">> extracting initrd (Debian cloud kernel needs it for virtio_blk + xfs)"
-INITRD_NAME=$(tar -tf "$ROOTFS_TAR" | grep -E "$INITRD_GLOB" | head -1)
+INITRD_NAME=$(tar -tf "$ROOTFS_TAR" | grep -E "$INITRD_GLOB" | head -1 || true)
 if [ -z "$INITRD_NAME" ]; then
     echo "error: no initrd matching $INITRD_GLOB found in rootfs" >&2
     exit 1
