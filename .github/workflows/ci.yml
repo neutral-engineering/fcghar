@@ -25,6 +25,9 @@ jobs:
         with:
           scandir: dist/vm
           severity: warning
+          # extract-vmlinux is a verbatim copy of linux/scripts/extract-vmlinux;
+          # we don't diverge from upstream just to satisfy lint.
+          ignore_names: extract-vmlinux
 
       - name: make help parses
         run: make help
