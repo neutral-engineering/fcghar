@@ -11,14 +11,22 @@ SSH_OPTS := -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLe
 DISTRO        ?= debian-trixie
 VCPU          ?= 4
 MEM_MIB       ?= 4096
-ROOT_SIZE_MB  ?= 10240
+ROOT_SIZE_MB  ?= 32768
+EXTRA_PKGS    ?= htop tmux duf ripgrep
+
+# Customization knobs for build-rootfs.sh:
+# - NO_DOCKER=1     skip the docker-ce install (~3 min faster, ~500 MB smaller)
+# - PREHOOK=<path>  splice a raw Dockerfile snippet into the build, right
+#                   after the runner is downloaded. See prehook.example.dockerfile.
+NO_DOCKER     ?=
+PREHOOK       ?=
 
 # vm-run.sh auto-picks the lowest free slot if SLOT is unset. ssh-runner /
 # vm-tail / vm-adopt / vm-down default to slot 0; pass SLOT=N to target a
 # specific VM. SLOTS sets how many tap-runner-* taps net-up.sh creates.
 SLOTS         ?= 8
 
-export DISTRO VCPU MEM_MIB ROOT_SIZE_MB SLOTS
+export DISTRO VCPU MEM_MIB ROOT_SIZE_MB SLOTS EXTRA_PKGS NO_DOCKER PREHOOK
 
 .PHONY: help
 help: ## Show this help
@@ -28,7 +36,7 @@ help: ## Show this help
 # ---------- vm runtime (firecracker) ----------
 
 .PHONY: vm-images vm-rootfs vm-net-up vm-net-down vm-run vm-up vm-down \
-        vm-tail vm-list vm-adopt oneshot ssh-runner
+        vm-tail vm-list vm-ping vm-adopt oneshot ssh-runner
 
 vm-images: ## Pull base docker image used by build-rootfs.sh (DISTRO=debian-trixie|debian-bookworm|ubuntu-noble|ubuntu-jammy|arch)
 	dist/vm/fetch-images.sh
@@ -86,6 +94,11 @@ vm-list: ## List running VMs (slot, pid, ip)
 	  if kill -0 "$$pid" 2>/dev/null; then status=alive; else status="dead (stale pidfile)"; fi; \
 	  printf "%-6s %-8s %-16s %s\n" "$$slot" "$$pid" "$$ip" "$$status"; \
 	done
+
+vm-ping: ## ICMP ping a runner VM (SLOT=N, default 0)
+	@slot=$${SLOT:-0}; ip="192.168.43.$$((10 + slot))"; \
+	 echo ">> ping slot=$$slot ip=$$ip"; \
+	 ping -c 1 -W 2 "$$ip"
 
 vm-adopt: ## SSH-register an already-built VM: PROJECT=owner/repo TOKEN=<token> [SLOT=N]
 	@if [ -z "$$PROJECT$$URL" ] || [ -z "$$TOKEN" ]; then \

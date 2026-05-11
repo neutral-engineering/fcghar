@@ -20,6 +20,16 @@ that are not derivable from the code alone.
 - The rootfs is built inside Docker (`docker build` + `docker export`),
   then untarred onto a fresh XFS image. `extract-vmlinux` pulls the ELF
   kernel out of the distro's bzImage.
+- The image bakes in: actions-runner, docker engine + buildx + compose
+  (gha is in the `docker` group), openssh-server, and `$EXTRA_PKGS`
+  (default `htop tmux duf ripgrep`). Same package names work on
+  apt + pacman; for distro-specific names, edit the per-branch list.
+- Two opt-in customization knobs handled in `build-rootfs.sh`:
+  `NO_DOCKER=1` skips the docker-ce install entirely (~3 min, ~500 MB),
+  and `PREHOOK=<path>` cat's a raw Dockerfile fragment into the build
+  right after the runner download (before docker). The PREHOOK splice
+  point is part of the contract — moving it would silently break user
+  snippets. Example at `dist/vm/prehook.example.dockerfile`.
 
 ## Registration model
 
@@ -61,6 +71,18 @@ that are not derivable from the code alone.
 - `firecracker` watches dst-IP 169.254.169.254 on the tap and responds
   inline; the kernel still needs to ARP for it, which is why
   `fcghar-network` adds the /32 route via eth0.
+
+## Disk auto-grow
+
+- `mkfs.xfs` runs at build time at `ROOT_SIZE_MB` (default 32 GB). The
+  file is sparse; bytes only land on host disk as the guest writes them.
+- `vm-run.sh` `truncate`s the per-slot drive up to `ROOT_SIZE_MB` if it's
+  smaller than that, so bumping the env between boots grows the disk
+  without a rootfs rebuild. We never shrink (XFS can't anyway).
+- `fcghar-growfs.service` runs `xfs_growfs /` before `basic.target` on
+  every boot — idempotent, no-op once the FS already fills the device.
+  Gated by `ConditionPathExists=/usr/sbin/xfs_growfs` so it silently
+  skips if `xfsprogs` is ever dropped.
 
 ## Distro support
 

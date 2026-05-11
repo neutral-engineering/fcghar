@@ -24,6 +24,7 @@ INITRD="$FCGHAR_VAR/initrd"
 
 VCPU="${VCPU:-4}"
 MEM_MIB="${MEM_MIB:-4096}"
+ROOT_SIZE_MB="${ROOT_SIZE_MB:-32768}"
 
 mkdir -p "$FCGHAR_VAR"
 
@@ -76,6 +77,16 @@ echo ">> slot=$SLOT ip=$VM_IP host=$HOST tap=$TAP mac=$MAC vcpu=$VCPU mem=${MEM_
 echo ">> staging $RUN_DRIVE from $TEMPLATE"
 rm -f "$RUN_DRIVE"
 cp --reflink=auto "$TEMPLATE" "$RUN_DRIVE"
+
+# Grow the per-slot drive up to ROOT_SIZE_MB if it's smaller (the template
+# might have been built at a smaller size). XFS is grown inside the VM by
+# fcghar-growfs.service. truncate never shrinks here — we only extend.
+TARGET_BYTES=$((ROOT_SIZE_MB * 1024 * 1024))
+CUR_BYTES=$(stat -c%s "$RUN_DRIVE")
+if [ "$CUR_BYTES" -lt "$TARGET_BYTES" ]; then
+    echo ">> growing $RUN_DRIVE to ${ROOT_SIZE_MB} MiB (xfs_growfs runs at boot)"
+    truncate -s "${ROOT_SIZE_MB}M" "$RUN_DRIVE"
+fi
 
 echo ">> writing $CONFIG"
 sed -e "s|__IP__|$VM_IP|g" \

@@ -1,0 +1,14 @@
+[Unit]
+Description=Grow root XFS to fill the block device
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target gha-register.service
+ConditionPathExists=/usr/sbin/xfs_growfs
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/xfs_growfs /
+
+[Install]
+WantedBy=basic.target
