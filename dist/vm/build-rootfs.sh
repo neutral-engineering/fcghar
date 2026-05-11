@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Build /tmp/fcghar/rootfs.xfs + kernel + initrd from a Debian/Ubuntu docker
-# image plus everything in overlays/. Bakes the actions-runner tarball in
-# pre-extracted under /home/gha/runner; if PROJECT/URL + TOKEN are set, also
-# bakes /etc/fcghar/register.env so gha-register.service auto-registers on
-# first boot.
+# Build /tmp/fcghar/rootfs.xfs + kernel + initrd from a Debian/Ubuntu/Arch
+# docker image plus everything in overlays/. Bakes the actions-runner
+# tarball in pre-extracted under /home/gha/runner. The rootfs is generic
+# (no URL/TOKEN baked in); registration data is delivered at boot via MMDS
+# by vm-run.sh.
 #
 # The mount + tar-extract step needs sudo. Everything else is unprivileged.
 set -euo pipefail
+
+# Absolutize PREHOOK before we cd — it was passed relative to the caller's
+# PWD (typically the repo root), not relative to dist/vm/.
+if [ -n "${PREHOOK:-}" ]; then
+    case "$PREHOOK" in /*) ;; *) PREHOOK="$PWD/$PREHOOK" ;; esac
+fi
 
 cd "$(dirname "$0")"
 
@@ -24,6 +30,10 @@ INITRD_OUT="$FCGHAR_VAR/initrd"
 
 RUNNER_VERSION="${RUNNER_VERSION:-2.334.0}"
 RUNNER_SHA256="${RUNNER_SHA256:-048024cd2c848eb6f14d5646d56c13a4def2ae7ee3ad12122bee960c56f3d271}"
+
+# Extra packages to install in the VM. Same names work on Debian/Ubuntu and
+# Arch. Override on the make line: EXTRA_PKGS="htop tmux ncdu" make vm-rootfs
+EXTRA_PKGS="${EXTRA_PKGS:-htop tmux duf ripgrep}"
 
 mkdir -p "$FCGHAR_VAR"
 
@@ -44,14 +54,22 @@ trap 'rm -rf "$BUILD_CTX"' EXIT
 cp -a overlays "$BUILD_CTX/overlays"
 
 # Stage authorized_keys from the invoking user's pubkeys for root@VM ssh.
+# Accept any *.pub (people use non-standard names like x13.pub), filter out
+# cert-authority pubs since those aren't authorized_keys material.
 USER_HOME="${SUDO_USER:+/home/$SUDO_USER}"
 USER_HOME="${USER_HOME:-$HOME}"
-if compgen -G "$USER_HOME/.ssh/id_*.pub" >/dev/null; then
-    cat "$USER_HOME"/.ssh/id_*.pub > "$BUILD_CTX/authorized_keys"
-    echo "   staged $(wc -l < "$BUILD_CTX/authorized_keys") authorized_keys entry(ies) from $USER_HOME/.ssh/"
+: > "$BUILD_CTX/authorized_keys"
+shopt -s nullglob
+for pub in "$USER_HOME"/.ssh/*.pub; do
+    case "$pub" in *-cert.pub) continue;; esac
+    cat "$pub" >> "$BUILD_CTX/authorized_keys"
+done
+shopt -u nullglob
+n=$(wc -l < "$BUILD_CTX/authorized_keys")
+if [ "$n" -gt 0 ]; then
+    echo "   staged $n authorized_keys entry(ies) from $USER_HOME/.ssh/"
 else
-    : > "$BUILD_CTX/authorized_keys"
-    echo "   warning: no $USER_HOME/.ssh/id_*.pub found — sshd will reject all logins" >&2
+    echo "   warning: no $USER_HOME/.ssh/*.pub found — sshd will reject all logins" >&2
 fi
 
 DOCKERFILE="$BUILD_CTX/Dockerfile"
@@ -70,12 +88,23 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \\
         systemd systemd-sysv dbus \\
         ${KERNEL_PKG} \\
+        initramfs-tools \\
         ca-certificates curl \\
         git jq sudo \\
         iproute2 iputils-ping \\
         openssh-server \\
         kmod udev \\
+        xfsprogs \\
+        ${EXTRA_PKGS} \\
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu's linux-image-virtual postinst doesn't reliably leave an initrd in
+# /boot inside docker (Debian's cloud kernel does). Force it for every
+# installed kernel; tolerate "already exists" so Debian stays a no-op.
+RUN for kver in \$(ls /lib/modules/ 2>/dev/null); do \\
+        update-initramfs -c -k "\$kver" 2>/dev/null \\
+            || update-initramfs -u -k "\$kver"; \\
+    done
 
 # Drop services that stall boot in a minimal microVM.
 RUN systemctl mask \\
@@ -100,6 +129,8 @@ RUN pacman -Syu --noconfirm \\
         openssh \\
         icu openssl krb5 zlib lttng-ust \\
         kmod udev \\
+        xfsprogs \\
+        ${EXTRA_PKGS} \\
     && pacman -Scc --noconfirm
 
 # mkinitcpio's default HOOKS use 'autodetect', which strips out modules the
@@ -178,23 +209,79 @@ RUN /home/gha/runner/bin/installdependencies.sh
 EOF
 fi
 
+# --- optional user prehook: arbitrary Dockerfile snippet from $PREHOOK ---
+# Splices in after the runner is downloaded and base deps are installed,
+# before docker. Use it for `RUN apt-get install …`, rustup, custom binaries
+# under /usr/local/bin, etc. The snippet is raw Dockerfile — user owns
+# picking apt vs pacman idioms.
+if [ -n "${PREHOOK:-}" ]; then
+    [ -f "$PREHOOK" ] || { echo "error: PREHOOK file not found: $PREHOOK" >&2; exit 1; }
+    echo ">> splicing PREHOOK from $PREHOOK"
+    echo "" >> "$DOCKERFILE"
+    echo "# --- PREHOOK ($PREHOOK) ---" >> "$DOCKERFILE"
+    cat "$PREHOOK" >> "$DOCKERFILE"
+    echo "" >> "$DOCKERFILE"
+    echo "# --- end PREHOOK ---" >> "$DOCKERFILE"
+fi
+
+# --- docker engine (matches what GHA-hosted runners ship); skip with NO_DOCKER=1 ---
+if [ -z "${NO_DOCKER:-}" ]; then
+case "$PKG_MGR" in
+    apt)
+        # Per https://docs.docker.com/engine/install/debian/. Works for Ubuntu
+        # too: the URL path is taken from /etc/os-release ID. docker-ce's
+        # postinstall creates the `docker` group; add gha to it so workflows
+        # can run docker without sudo.
+        cat >> "$DOCKERFILE" <<'EOF'
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && DOCKER_ID=$(. /etc/os-release && echo "$ID") \
+    && curl -fsSL "https://download.docker.com/linux/${DOCKER_ID}/gpg" -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && { \
+        echo "Types: deb"; \
+        echo "URIs: https://download.docker.com/linux/${DOCKER_ID}"; \
+        echo "Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")"; \
+        echo "Components: stable"; \
+        echo "Architectures: $(dpkg --print-architecture)"; \
+        echo "Signed-By: /etc/apt/keyrings/docker.asc"; \
+    } > /etc/apt/sources.list.d/docker.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+    && usermod -aG docker gha \
+    && systemctl enable docker.service
+EOF
+        ;;
+    pacman)
+        cat >> "$DOCKERFILE" <<'EOF'
+RUN pacman -S --noconfirm docker docker-buildx docker-compose \
+    && pacman -Scc --noconfirm \
+    && usermod -aG docker gha \
+    && systemctl enable docker.service
+EOF
+        ;;
+esac
+else
+    echo ">> NO_DOCKER set — skipping docker engine install"
+fi
+
 # --- common tail: overlays + /etc/fcghar + service enable ---
 cat >> "$DOCKERFILE" <<'EOF'
 
 # Overlays (systemd units, network helper, resolv.conf).
 COPY overlays/ /
 
-# /etc/fcghar/ holds register.env (URL/TOKEN, written into the rootfs at
-# build-time below) and the .registered touchfile that gha-register.service
-# uses to skip itself on subsequent boots.
+# /etc/fcghar/ holds the .registered touchfile that gha-register.service
+# uses to skip itself on subsequent boots. URL/TOKEN come from MMDS at boot,
+# not from a file in the rootfs.
 RUN mkdir -p /etc/fcghar \
-    && touch /etc/fcghar/register.env \
-    && chmod 0600 /etc/fcghar/register.env \
     && chmod 0755 /usr/local/bin/fcghar-network /usr/local/bin/gha-register
 
 # Per-VM network from kernel cmdline. gha-register fires once at first boot,
 # touches /etc/fcghar/.registered, then gha.service starts run.sh.
-RUN systemctl enable fcghar-network.service gha-register.service gha.service
+RUN systemctl enable fcghar-network.service fcghar-growfs.service gha-register.service gha.service
 EOF
 
 docker build -t "$IMAGE_TAG" "$BUILD_CTX"
@@ -206,7 +293,7 @@ docker export "$CID" > "$ROOTFS_TAR"
 docker rm "$CID" >/dev/null
 
 echo ">> extracting kernel (firecracker x86_64 only loads uncompressed ELF)"
-KERNEL_NAME=$(tar -tf "$ROOTFS_TAR" | grep -E "$KERNEL_GLOB" | head -1)
+KERNEL_NAME=$(tar -tf "$ROOTFS_TAR" | grep -E "$KERNEL_GLOB" | head -1 || true)
 if [ -z "$KERNEL_NAME" ]; then
     echo "error: no kernel matching $KERNEL_GLOB found in rootfs" >&2
     exit 1
@@ -217,7 +304,7 @@ tar -xOf "$ROOTFS_TAR" "$KERNEL_NAME" > "$BUILD_CTX/bzImage"
 echo "   wrote $KERNEL_OUT ($(stat -c%s "$KERNEL_OUT") bytes ELF)"
 
 echo ">> extracting initrd (Debian cloud kernel needs it for virtio_blk + xfs)"
-INITRD_NAME=$(tar -tf "$ROOTFS_TAR" | grep -E "$INITRD_GLOB" | head -1)
+INITRD_NAME=$(tar -tf "$ROOTFS_TAR" | grep -E "$INITRD_GLOB" | head -1 || true)
 if [ -z "$INITRD_NAME" ]; then
     echo "error: no initrd matching $INITRD_GLOB found in rootfs" >&2
     exit 1
@@ -242,23 +329,6 @@ sudo tee "$MNT/etc/resolv.conf" > /dev/null <<'EOF'
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 EOF
-
-# Bake URL + TOKEN into /etc/fcghar/register.env so gha-register.service
-# auto-registers on first boot. Either PROJECT=owner/repo or URL=… works.
-if [ -n "${TOKEN:-}" ]; then
-    if [ -z "${URL:-}" ] && [ -n "${PROJECT:-}" ]; then
-        URL="https://github.com/$PROJECT"
-    fi
-    : "${URL:?need URL or PROJECT when TOKEN is set}"
-    sudo tee "$MNT/etc/fcghar/register.env" > /dev/null <<EOF
-URL=$URL
-TOKEN=$TOKEN
-EOF
-    sudo chmod 0600 "$MNT/etc/fcghar/register.env"
-    echo "   baked URL=$URL into /etc/fcghar/register.env (token elided)"
-else
-    echo "   no TOKEN given — register.env left empty; use 'make vm-adopt' at runtime"
-fi
 
 sudo mkdir -p "$MNT/dev" "$MNT/proc" "$MNT/sys" "$MNT/run"
 sudo umount "$MNT"

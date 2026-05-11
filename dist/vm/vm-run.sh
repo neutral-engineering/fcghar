@@ -24,6 +24,7 @@ INITRD="$FCGHAR_VAR/initrd"
 
 VCPU="${VCPU:-4}"
 MEM_MIB="${MEM_MIB:-4096}"
+ROOT_SIZE_MB="${ROOT_SIZE_MB:-32768}"
 
 mkdir -p "$FCGHAR_VAR"
 
@@ -49,6 +50,7 @@ RUN_DRIVE="$FCGHAR_VAR/runner-$SLOT.xfs"
 PIDFILE="$FCGHAR_VAR/runner-$SLOT.pid"
 LOGFILE="$FCGHAR_VAR/runner-$SLOT.log"
 CONFIG="$FCGHAR_VAR/runner-$SLOT.config.json"
+MMDS_JSON="$FCGHAR_VAR/runner-$SLOT.mmds.json"
 
 [ -f "$CONFIG_TEMPLATE" ] || { echo "error: missing $CONFIG_TEMPLATE" >&2; exit 1; }
 [ -f "$TEMPLATE" ] || { echo "error: missing $TEMPLATE — run ./build-rootfs.sh first" >&2; exit 1; }
@@ -76,6 +78,16 @@ echo ">> staging $RUN_DRIVE from $TEMPLATE"
 rm -f "$RUN_DRIVE"
 cp --reflink=auto "$TEMPLATE" "$RUN_DRIVE"
 
+# Grow the per-slot drive up to ROOT_SIZE_MB if it's smaller (the template
+# might have been built at a smaller size). XFS is grown inside the VM by
+# fcghar-growfs.service. truncate never shrinks here — we only extend.
+TARGET_BYTES=$((ROOT_SIZE_MB * 1024 * 1024))
+CUR_BYTES=$(stat -c%s "$RUN_DRIVE")
+if [ "$CUR_BYTES" -lt "$TARGET_BYTES" ]; then
+    echo ">> growing $RUN_DRIVE to ${ROOT_SIZE_MB} MiB (xfs_growfs runs at boot)"
+    truncate -s "${ROOT_SIZE_MB}M" "$RUN_DRIVE"
+fi
+
 echo ">> writing $CONFIG"
 sed -e "s|__IP__|$VM_IP|g" \
     -e "s|__HOST__|$HOST|g" \
@@ -86,12 +98,32 @@ sed -e "s|__IP__|$VM_IP|g" \
     -e "s/\"mem_size_mib\": *[0-9]\\+/\"mem_size_mib\": $MEM_MIB/" \
     "$CONFIG_TEMPLATE" > "$CONFIG"
 
+# MMDS payload: gha-register fetches URL+TOKEN from http://169.254.169.254/
+# at first boot, so the rootfs stays generic and we don't rebuild per token.
+# Either PROJECT=owner/repo or full URL= works.
+if [ -n "${TOKEN:-}" ]; then
+    if [ -z "${URL:-}" ] && [ -n "${PROJECT:-}" ]; then
+        URL="https://github.com/$PROJECT"
+    fi
+    : "${URL:?need URL or PROJECT when TOKEN is set}"
+    cat > "$MMDS_JSON" <<EOF
+{ "fcghar": { "url": "$URL", "token": "$TOKEN" } }
+EOF
+    chmod 0600 "$MMDS_JSON"
+    echo ">> mmds: url=$URL token=<elided>"
+else
+    cat > "$MMDS_JSON" <<'EOF'
+{ "fcghar": {} }
+EOF
+    echo ">> mmds: empty (no TOKEN given — runner won't auto-register)"
+fi
+
 if [ "$BACKGROUND" -eq 1 ]; then
     echo ">> starting firecracker in background (log: $LOGFILE)"
-    setsid firecracker --no-api --config-file "$CONFIG" </dev/null >"$LOGFILE" 2>&1 &
+    setsid firecracker --no-api --config-file "$CONFIG" --metadata "$MMDS_JSON" </dev/null >"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     echo "   pid $(cat "$PIDFILE")"
 else
     echo ">> starting firecracker (foreground)"
-    exec firecracker --no-api --config-file "$CONFIG"
+    exec firecracker --no-api --config-file "$CONFIG" --metadata "$MMDS_JSON"
 fi

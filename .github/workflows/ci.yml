@@ -1,0 +1,116 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n on all shell scripts
+        run: |
+          set -e
+          mapfile -t files < <(find dist/vm -type f \( -name '*.sh' -o -path '*/overlays/usr/local/bin/*' \))
+          for f in "${files[@]}"; do
+            echo "syntax: $f"
+            bash -n "$f"
+          done
+
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: dist/vm
+          severity: warning
+          # extract-vmlinux is a verbatim copy of linux/scripts/extract-vmlinux;
+          # we don't diverge from upstream just to satisfy lint.
+          ignore_names: extract-vmlinux
+
+      - name: make help parses
+        run: make help
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - debian-trixie
+          - debian-bookworm
+          - ubuntu-noble
+          - ubuntu-jammy
+          - arch
+        flags:
+          - {}
+        include:
+          # Extra coverage for opt-in flags. Only on the default distro
+          # to keep CI minutes sane.
+          - distro: debian-trixie
+            flags: {NO_DOCKER: "1"}
+          - distro: debian-trixie
+            flags: {PREHOOK: "dist/vm/prehook.example.dockerfile"}
+    name: build (${{ matrix.distro }}${{ matrix.flags.NO_DOCKER && ', NO_DOCKER' || '' }}${{ matrix.flags.PREHOOK && ', PREHOOK' || '' }})
+    env:
+      DISTRO: ${{ matrix.distro }}
+      NO_DOCKER: ${{ matrix.flags.NO_DOCKER }}
+      PREHOOK: ${{ matrix.flags.PREHOOK }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build deps
+        run: sudo apt-get update -qq && sudo apt-get install -qq -y xfsprogs
+
+      - name: Free up disk
+        # The 32 GB sparse rootfs is fine, but apt caches + preinstalled
+        # toolchains hog space. Drop the obvious bulk.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache
+          df -h /
+
+      - name: Pull base docker image
+        run: make vm-images
+
+      - name: Build rootfs
+        run: make vm-rootfs
+
+      - name: Assert outputs
+        run: |
+          set -eux
+          test -s /tmp/fcghar/vmlinux
+          test -s /tmp/fcghar/initrd
+          test -s /tmp/fcghar/rootfs.xfs
+          ls -lh /tmp/fcghar/
+
+      - name: Mount + assert rootfs contents
+        run: |
+          set -eux
+          sudo mkdir -p /mnt/rootfs
+          sudo mount -o loop /tmp/fcghar/rootfs.xfs /mnt/rootfs
+          # Overlays landed
+          sudo test -x /mnt/rootfs/usr/local/bin/fcghar-network
+          sudo test -x /mnt/rootfs/usr/local/bin/gha-register
+          sudo test -f /mnt/rootfs/etc/systemd/system/fcghar-network.service
+          sudo test -f /mnt/rootfs/etc/systemd/system/fcghar-growfs.service
+          sudo test -f /mnt/rootfs/etc/systemd/system/gha-register.service
+          sudo test -f /mnt/rootfs/etc/systemd/system/gha.service
+          # Runner pre-extracted
+          sudo test -x /mnt/rootfs/home/gha/runner/config.sh
+          # Docker installed iff NO_DOCKER unset
+          if [ -z "${NO_DOCKER:-}" ]; then
+            sudo test -x /mnt/rootfs/usr/bin/docker || sudo test -x /mnt/rootfs/usr/local/bin/docker
+          else
+            sudo bash -c '! test -x /mnt/rootfs/usr/bin/docker'
+          fi
+          # xfs_growfs present (auto-grow service depends on it)
+          sudo test -x /mnt/rootfs/usr/sbin/xfs_growfs
+          # PREHOOK ran (rustup install in the example writes /home/gha/.cargo)
+          if [ -n "${PREHOOK:-}" ]; then
+            sudo test -d /mnt/rootfs/home/gha/.cargo
+            sudo test -x /mnt/rootfs/home/gha/.cargo/bin/rustc
+          fi
+          sudo umount /mnt/rootfs

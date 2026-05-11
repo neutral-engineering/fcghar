@@ -64,6 +64,9 @@ case "${1:-up}" in
         ip addr flush dev "$iface"
         ip addr add "${ip}/${prefix}" dev "$iface"
         ip route add default via "$gw" dev "$iface"
+        # Pin MMDS (169.254.169.254) to this iface so gha-register can curl
+        # firecracker's metadata service without going via the default gw.
+        ip route add 169.254.169.254/32 dev "$iface"
 
         # We run before basic.target (DefaultDependencies=no), so dbus isn't
         # up yet — that rules out `hostnamectl`. `hostname` (the binary) is
@@ -79,7 +82,8 @@ case "${1:-up}" in
         ;;
     down)
         ip route del default 2>/dev/null || true
-        for iface in $(ls /sys/class/net 2>/dev/null); do
+        for path in /sys/class/net/*; do
+            iface=${path##*/}
             [ "$iface" = "lo" ] && continue
             ip addr flush dev "$iface" 2>/dev/null || true
         done

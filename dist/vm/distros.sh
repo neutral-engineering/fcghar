@@ -1,6 +1,8 @@
 # Sourced by build-rootfs.sh and fetch-images.sh.
 # Sets BASE / KERNEL_PKG / KERNEL_GLOB / INITRD_GLOB / PKG_MGR / SSHD_SVC
 # based on $DISTRO. PKG_MGR = "apt" | "pacman" picks the Dockerfile dialect.
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # vars are consumed by the sourcing script
 
 distro_setup() {
     case "${DISTRO:-debian-trixie}" in
